@@ -23,15 +23,14 @@ use json_unshell_tools::json::{self, Writable};
 fn main() -> io::Result<()> {
     let mut args = env::args_os();
     let mut output = io::stdout();
-    if args.len() <= 1 {
+    let _ = args.next();
+    if args.len() == 0 {
         return copy(io::stdin(), &mut output);
     }
-    loop {
-        match args.next() {
-            Some(arg) => open(arg.as_os_str(), &mut output)?,
-            None => return Ok(()),
-        }
+    for arg in args {
+       open(arg.as_os_str(), &mut output)?;
     }
+    Ok(())
 }
 
 
