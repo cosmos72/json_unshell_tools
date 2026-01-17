@@ -40,8 +40,13 @@ fn open<W: io::Write>(path: &OsStr, mut output: W) -> io::Result<()> {
 }
 
 fn copy<R: io::Read, W: io::Write>(input: R, mut output: W) -> io::Result<()> {
-    let mut parser = json::PullParser::new(input);
+    let ret = copy_loop(input, &mut output);
+    let _ = output.flush();
+    ret
+}
 
+fn copy_loop<R: io::Read, W: io::Write>(input: R, mut output: W) -> io::Result<()> {
+    let mut parser = json::PullParser::new(input);
     loop {
         let tok = parser.next_token()?;
         if tok == json::Token::Eof {
