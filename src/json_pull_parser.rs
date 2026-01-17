@@ -678,19 +678,15 @@ fn error(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-fn main() -> io::Result<()> {
-    let mut parser = JsonPullParser::new(io::stdin()); // io::Cursor::new(json);
+/*
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    loop {
-        let tok = parser.next_token()?;
-        if tok == JsonToken::Eof {
-            break;
-        }
-        print!("{:?} ", tok);
-        if parser.next_stream()? {
-            println!();
-        }
+    #[test]
+    fn it_works() {
+        let result = add(2, 2);
+        assert_eq!(result, 4);
     }
-    println!();
-    Ok(())
 }
+*/
