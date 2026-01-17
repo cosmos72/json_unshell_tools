@@ -13,23 +13,24 @@
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
  */
-use std::io;
+use std::io::{self, Write};
 
-use json_unshell_tools::json;
+use json_unshell_tools::json::{self, Writable};
 
 fn main() -> io::Result<()> {
     let mut parser = json::PullParser::new(io::stdin()); // io::Cursor::new(json);
+    let mut out = io::stdout();
 
     loop {
         let tok = parser.next_token()?;
         if tok == json::Token::Eof {
             break;
         }
-        print!("{:?} ", tok);
+        tok.write_to(&mut out)?;
         if parser.next_stream()? {
-            println!();
+            out.write(b"\n")?;
         }
     }
-    println!();
+    out.write(b"\n")?;
     Ok(())
 }

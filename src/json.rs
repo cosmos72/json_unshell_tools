@@ -16,6 +16,10 @@
 use std::{ascii, fmt, io};
 //use num_bigint;
 
+pub trait Writable {
+  fn write_to<W: io::Write>(&self, dst: &mut W) -> io::Result<()>;
+}
+
 #[derive(PartialEq)]
 pub enum Token {
     StartObject,
@@ -42,6 +46,29 @@ pub struct PullParser<R: io::Read> {
     eof: bool,
 }
 
+impl Writable for Token {
+    fn write_to<W: io::Write>(&self, dst: &mut W) -> io::Result<()> {
+        match self {
+            Token::StartObject => write_bytes(dst, b"{"),
+            Token::EndObject => write_bytes(dst, b"}"),
+            Token::StartArray => write_bytes(dst, b"]"),
+            Token::EndArray => write_bytes(dst, b"]"),
+            Token::Boolean(b) => write_bytes(dst, if *b { b"true" } else { b"false"}),
+            Token::Number(n) => write_bytes(dst, n.as_bytes()),
+            Token::String(s) => {
+                write_bytes(dst, b"\"")?;
+                write_bytes(dst, s)?;
+                write_bytes(dst, b"\"")
+            }
+            Token::Null => write_bytes(dst, b"null"),
+            Token::Colon => write_bytes(dst, b":"),
+            Token::Comma => write_bytes(dst, b","),
+            Token::Eof => write_bytes(dst, b"EOF"),
+        }
+    }
+}
+
+
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -50,7 +77,7 @@ impl fmt::Debug for Token {
             Token::StartArray => write!(f, "["),
             Token::EndArray => write!(f, "]"),
             Token::Boolean(b) => write!(f, "{}", b),
-            Token::Number(n) => write!(f, "{:?}", &n),
+            Token::Number(n) => write!(f, "{}", &n),
             Token::String(s) => write!(f, "\"{}\"", String::from_utf8_lossy(&s)),
             Token::Null => write!(f, "null"),
             Token::Colon => write!(f, ":"),
@@ -61,6 +88,17 @@ impl fmt::Debug for Token {
 }
 
 /* -------------------------------- implementation -------------------------- */
+
+fn write_bytes<W: io::Write,>(dst: &mut W, bytes: &[u8]) -> io::Result<()> {
+    check(dst.write(bytes))
+}
+
+fn check(val: io::Result<usize>) -> io::Result<()> {
+    match val {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
 
 #[derive(Copy, Clone)]
 enum Kind {
