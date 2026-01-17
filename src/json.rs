@@ -17,7 +17,7 @@ use std::{ascii, fmt, io};
 //use num_bigint;
 
 #[derive(PartialEq)]
-pub enum JsonToken {
+pub enum Token {
     StartObject,
     EndObject,
     StartArray,
@@ -31,7 +31,7 @@ pub enum JsonToken {
     Eof,
 }
 
-pub struct JsonPullParser<R: io::Read> {
+pub struct PullParser<R: io::Read> {
     pos: usize,
     len: usize,
     reader: R,
@@ -42,20 +42,20 @@ pub struct JsonPullParser<R: io::Read> {
     eof: bool,
 }
 
-impl fmt::Debug for JsonToken {
+impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            JsonToken::StartObject => write!(f, "{{"),
-            JsonToken::EndObject => write!(f, "}}"),
-            JsonToken::StartArray => write!(f, "["),
-            JsonToken::EndArray => write!(f, "]"),
-            JsonToken::Boolean(b) => write!(f, "{}", b),
-            JsonToken::Number(n) => write!(f, "{:?}", &n),
-            JsonToken::String(s) => write!(f, "\"{}\"", String::from_utf8_lossy(&s)),
-            JsonToken::Null => write!(f, "null"),
-            JsonToken::Colon => write!(f, ":"),
-            JsonToken::Comma => write!(f, ","),
-            JsonToken::Eof => write!(f, "EOF"),
+            Token::StartObject => write!(f, "{{"),
+            Token::EndObject => write!(f, "}}"),
+            Token::StartArray => write!(f, "["),
+            Token::EndArray => write!(f, "]"),
+            Token::Boolean(b) => write!(f, "{}", b),
+            Token::Number(n) => write!(f, "{:?}", &n),
+            Token::String(s) => write!(f, "\"{}\"", String::from_utf8_lossy(&s)),
+            Token::Null => write!(f, "null"),
+            Token::Colon => write!(f, ":"),
+            Token::Comma => write!(f, ","),
+            Token::Eof => write!(f, "EOF"),
         }
     }
 }
@@ -113,25 +113,25 @@ impl fmt::Debug for Kind {
     }
 }
 
-impl JsonToken {
+impl Token {
     fn kind(&self) -> Kind {
         match self {
-            JsonToken::StartObject => Kind::StartObject,
-            JsonToken::EndObject => Kind::EndObject,
-            JsonToken::StartArray => Kind::StartArray,
-            JsonToken::EndArray => Kind::EndArray,
-            JsonToken::Boolean(_) => Kind::Boolean,
-            JsonToken::Number(_) => Kind::Number,
-            JsonToken::String(_) => Kind::String,
-            JsonToken::Null => Kind::Null,
-            JsonToken::Colon => Kind::Colon,
-            JsonToken::Comma => Kind::Comma,
-            JsonToken::Eof => Kind::Eof,
+            Token::StartObject => Kind::StartObject,
+            Token::EndObject => Kind::EndObject,
+            Token::StartArray => Kind::StartArray,
+            Token::EndArray => Kind::EndArray,
+            Token::Boolean(_) => Kind::Boolean,
+            Token::Number(_) => Kind::Number,
+            Token::String(_) => Kind::String,
+            Token::Null => Kind::Null,
+            Token::Colon => Kind::Colon,
+            Token::Comma => Kind::Comma,
+            Token::Eof => Kind::Eof,
         }
     }
 }
 
-impl<R: io::Read> JsonPullParser<R> {
+impl<R: io::Read> PullParser<R> {
     pub fn new(reader: R) -> Self {
         Self {
             pos: 0,
@@ -149,10 +149,10 @@ impl<R: io::Read> JsonPullParser<R> {
     }
 
     /**
-     * @return Ok(JsonToken) containing the next parsed json token,
-     * which will be JsonToken::Eof at end of input stream.
+     * @return Ok(Token) containing the next parsed json token,
+     * which will be Token::Eof at end of input stream.
      */
-    pub fn next_token(&mut self) -> io::Result<JsonToken> {
+    pub fn next_token(&mut self) -> io::Result<Token> {
         let tok = self.next_raw_token()?;
         self.validate_kind(tok.kind())?;
         Ok(tok)
@@ -179,38 +179,38 @@ impl<R: io::Read> JsonPullParser<R> {
         }
     }
 
-    fn next_raw_token(&mut self) -> io::Result<JsonToken> {
+    fn next_raw_token(&mut self) -> io::Result<Token> {
         self.skip_whitespace()?;
 
         let ch = match self.peek_byte()? {
             Some(b) => b,
-            None => return Ok(JsonToken::Eof),
+            None => return Ok(Token::Eof),
         };
 
         match ch {
             b'{' => {
                 self.consume_byte()?;
-                Ok(JsonToken::StartObject)
+                Ok(Token::StartObject)
             }
             b'}' => {
                 self.consume_byte()?;
-                Ok(JsonToken::EndObject)
+                Ok(Token::EndObject)
             }
             b'[' => {
                 self.consume_byte()?;
-                Ok(JsonToken::StartArray)
+                Ok(Token::StartArray)
             }
             b']' => {
                 self.consume_byte()?;
-                Ok(JsonToken::EndArray)
+                Ok(Token::EndArray)
             }
             b':' => {
                 self.consume_byte()?;
-                Ok(JsonToken::Colon)
+                Ok(Token::Colon)
             }
             b',' => {
                 self.consume_byte()?;
-                Ok(JsonToken::Comma)
+                Ok(Token::Comma)
             }
             b'"' => self.parse_string(),
             b'-' | b'0'..=b'9' => self.parse_number(),
@@ -225,7 +225,7 @@ impl<R: io::Read> JsonPullParser<R> {
 
     /* ---------- Parsing ---------- */
 
-    fn parse_string(&mut self) -> io::Result<JsonToken> {
+    fn parse_string(&mut self) -> io::Result<Token> {
         self.consume_expected(b'"')?;
         let mut out: Vec<u8> = Vec::new();
 
@@ -247,10 +247,10 @@ impl<R: io::Read> JsonPullParser<R> {
             }
         }
 
-        Ok(JsonToken::String(out))
+        Ok(Token::String(out))
     }
 
-    fn parse_number(&mut self) -> io::Result<JsonToken> {
+    fn parse_number(&mut self) -> io::Result<Token> {
         let mut s = String::new();
 
         if self.peek_byte()? == Some(b'-') {
@@ -308,22 +308,22 @@ impl<R: io::Read> JsonPullParser<R> {
             }
         }
 
-        Ok(JsonToken::Number(s))
+        Ok(Token::Number(s))
     }
 
-    fn parse_boolean(&mut self, ch: u8) -> io::Result<JsonToken> {
+    fn parse_boolean(&mut self, ch: u8) -> io::Result<Token> {
         if ch == b't' && self.consume_keyword("true")? {
-            Ok(JsonToken::Boolean(true))
+            Ok(Token::Boolean(true))
         } else if ch == b'f' && self.consume_keyword("false")? {
-            Ok(JsonToken::Boolean(false))
+            Ok(Token::Boolean(false))
         } else {
             err("invalid json boolean keyword")
         }
     }
 
-    fn parse_null(&mut self) -> io::Result<JsonToken> {
+    fn parse_null(&mut self) -> io::Result<Token> {
         if self.consume_keyword("null")? {
-            Ok(JsonToken::Null)
+            Ok(Token::Null)
         } else {
             err("invalid json null keyword")
         }

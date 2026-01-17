@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "json_unshell"
+name = "json_unshell_tools"
 version = "0.0.1"

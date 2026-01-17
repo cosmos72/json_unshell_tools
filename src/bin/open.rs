@@ -15,14 +15,14 @@
  */
 use std::io;
 
-use json_unshell::json_pull_parser;
+use json_unshell_tools::json;
 
 fn main() -> io::Result<()> {
-    let mut parser = json_pull_parser::JsonPullParser::new(io::stdin()); // io::Cursor::new(json);
+    let mut parser = json::PullParser::new(io::stdin()); // io::Cursor::new(json);
 
     loop {
         let tok = parser.next_token()?;
-        if tok == json_pull_parser::JsonToken::Eof {
+        if tok == json::Token::Eof {
             break;
         }
         print!("{:?} ", tok);
