@@ -302,10 +302,10 @@ impl<R: io::Read> PullParser<R> {
                 self.consume_byte()?;
                 match self.peek_byte()? {
                     Some(x) => {
-                        if !matches!(x, b',' | b']' | b'}' | b' ' | b'\n' | b'\r' | b'\t') {
+                        if !matches!(x, b',' | b']' | b'}' | b' ' | b'.' | b'e' | b'E' | b'\n' | b'\r' | b'\t') {
                             return err(&format!("invalid byte {} after 0 in json number", x));
                         }
-                    }
+                    },
                     None => {}
                 }
             }
@@ -313,7 +313,7 @@ impl<R: io::Read> PullParser<R> {
                 while let Some(b'0'..=b'9') = self.peek_byte()? {
                     s.push(self.next_byte()?.unwrap() as char);
                 }
-            }
+            },
             Some(b) => return err(&format!("invalid byte {} in json number", b)),
             _ => return err("invalid json number"),
         }
