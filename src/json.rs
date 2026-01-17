@@ -17,7 +17,7 @@ use std::{ascii, fmt, io};
 //use num_bigint;
 
 pub trait Writable {
-  fn write_to<W: io::Write>(&self, dst: &mut W) -> io::Result<()>;
+    fn write_to<W: io::Write>(&self, dst: &mut W) -> io::Result<()>;
 }
 
 #[derive(PartialEq)]
@@ -51,9 +51,9 @@ impl Writable for Token {
         match self {
             Token::StartObject => write_bytes(dst, b"{"),
             Token::EndObject => write_bytes(dst, b"}"),
-            Token::StartArray => write_bytes(dst, b"]"),
+            Token::StartArray => write_bytes(dst, b"["),
             Token::EndArray => write_bytes(dst, b"]"),
-            Token::Boolean(b) => write_bytes(dst, if *b { b"true" } else { b"false"}),
+            Token::Boolean(b) => write_bytes(dst, if *b { b"true" } else { b"false" }),
             Token::Number(n) => write_bytes(dst, n.as_bytes()),
             Token::String(s) => {
                 write_bytes(dst, b"\"")?;
@@ -67,7 +67,6 @@ impl Writable for Token {
         }
     }
 }
-
 
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -89,7 +88,7 @@ impl fmt::Debug for Token {
 
 /* -------------------------------- implementation -------------------------- */
 
-fn write_bytes<W: io::Write,>(dst: &mut W, bytes: &[u8]) -> io::Result<()> {
+fn write_bytes<W: io::Write>(dst: &mut W, bytes: &[u8]) -> io::Result<()> {
     check(dst.write(bytes))
 }
 
@@ -302,10 +301,13 @@ impl<R: io::Read> PullParser<R> {
                 self.consume_byte()?;
                 match self.peek_byte()? {
                     Some(x) => {
-                        if !matches!(x, b',' | b']' | b'}' | b' ' | b'.' | b'e' | b'E' | b'\n' | b'\r' | b'\t') {
+                        if !matches!(
+                            x,
+                            b',' | b']' | b'}' | b' ' | b'.' | b'e' | b'E' | b'\n' | b'\r' | b'\t'
+                        ) {
                             return err(&format!("invalid byte {} after 0 in json number", x));
                         }
-                    },
+                    }
                     None => {}
                 }
             }
@@ -313,7 +315,7 @@ impl<R: io::Read> PullParser<R> {
                 while let Some(b'0'..=b'9') = self.peek_byte()? {
                     s.push(self.next_byte()?.unwrap() as char);
                 }
-            },
+            }
             Some(b) => return err(&format!("invalid byte {} in json number", b)),
             _ => return err("invalid json number"),
         }
