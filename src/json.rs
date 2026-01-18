@@ -216,6 +216,17 @@ impl<R: io::Read> PullParser<R> {
         }
     }
 
+    /**
+     * skip whitespace, then @return Ok(true) if reached EOF.
+     *
+     * Usually not needed, as parser detects and reports EOF.
+     * Useful mostly to detect empty files (which do not comply with Json specs).
+     */
+    pub fn is_eof(&mut self) -> io::Result<bool> {
+        self.skip_whitespace()?;
+        Ok(self.eof)
+    }
+
     fn next_raw_token(&mut self) -> io::Result<Token> {
         self.skip_whitespace()?;
 
@@ -594,7 +605,7 @@ impl<R: io::Read> PullParser<R> {
  * interpret any escape sequence found in a Json string (represented as &[u8])
  * and return the corresponding unescaped String
  */
-pub fn unescape(input: &[u8]) -> io::Result<String> {
+pub fn unescape_string(input: &[u8]) -> io::Result<String> {
     let mut bytes = input.iter().copied().peekable();
     let mut output = String::new();
 
@@ -700,7 +711,7 @@ where
                 return err(&format!(
                     "invalid hex digit {} in \\u escape in json string",
                     b as char
-                ))
+                ));
             }
         };
 
