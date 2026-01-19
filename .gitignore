@@ -1,4 +1,4 @@
-/open
+/open*
 /target
 *.o
 *.rlib
