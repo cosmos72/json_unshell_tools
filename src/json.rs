@@ -28,7 +28,7 @@ pub enum Token {
     EndArray,
     Boolean(bool),
     Number(String), /* contains literal digits, including sign, fraction and exponent */
-    String(Vec<u8>), /* contains literal bytes, including escape sequences \uxxxx */
+    String(String), /* contains literal characters, including escape sequences \n \r \t \uxxxx ... */
     Null,
     Colon,
     Comma,
@@ -57,13 +57,13 @@ impl Writable for Token {
             Token::Number(n) => write_bytes(dst, n.as_bytes()),
             Token::String(s) => {
                 write_bytes(dst, b"\"")?;
-                write_bytes(dst, s)?;
+                write_bytes(dst, s.as_bytes())?;
                 write_bytes(dst, b"\"")
             }
             Token::Null => write_bytes(dst, b"null"),
             Token::Colon => write_bytes(dst, b":"),
             Token::Comma => write_bytes(dst, b","),
-            Token::Eof => write_bytes(dst, b"EOF"),
+            Token::Eof => Ok(()),
         }
     }
 }
@@ -77,11 +77,11 @@ impl fmt::Debug for Token {
             Token::EndArray => write!(f, "]"),
             Token::Boolean(b) => write!(f, "{}", b),
             Token::Number(n) => write!(f, "{}", &n),
-            Token::String(s) => write!(f, "\"{}\"", String::from_utf8_lossy(&s)),
+            Token::String(s) => write!(f, "\"{}\"", &s),
             Token::Null => write!(f, "null"),
             Token::Colon => write!(f, ":"),
             Token::Comma => write!(f, ","),
-            Token::Eof => write!(f, "EOF"),
+            Token::Eof => Ok(()),
         }
     }
 }
@@ -130,6 +130,12 @@ enum Expect {
 enum RootState {
     ExpectValue,
     Done,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum ParseMode {
+    Parse,
+    Skip,
 }
 
 impl fmt::Debug for Kind {
@@ -186,11 +192,29 @@ impl<R: io::Read> PullParser<R> {
     }
 
     /**
+     * Parse a single json token and return it.
+     *
      * @return Ok(Token) containing the next parsed json token,
      * which will be Token::Eof at end of input stream.
      */
     pub fn next_token(&mut self) -> io::Result<Token> {
-        let tok = self.next_raw_token()?;
+        let tok = self.parse_token(ParseMode::Parse)?;
+        self.validate_kind(tok.kind())?;
+        Ok(tok)
+    }
+
+    /**
+     * Parse a single json token,
+     * discarding its content in case it is a number or string
+     * (but preserving its kind), and return it.
+     *
+     * Faster than next().
+     *
+     * @return Ok(Token) containing the next parsed json token,
+     * which will be Token::Eof at end of input stream.
+     */
+    pub fn skip_token(&mut self) -> io::Result<Token> {
+        let tok = self.parse_token(ParseMode::Skip)?;
         self.validate_kind(tok.kind())?;
         Ok(tok)
     }
@@ -205,8 +229,10 @@ impl<R: io::Read> PullParser<R> {
      * If you want to strictly comply with Json specs, simply do NOT call this function.
      */
     pub fn next_stream(&mut self) -> io::Result<bool> {
-        if self.root == RootState::Done && self.stack.is_empty() {
-            self.skip_whitespace()?;
+        if self.eof {
+            Ok(false)
+        } else if self.root == RootState::Done && self.stack.is_empty() {
+            self.skip_whitespace()?; // updates self.eof
             if !self.eof {
                 self.root = RootState::ExpectValue;
             }
@@ -227,15 +253,15 @@ impl<R: io::Read> PullParser<R> {
         Ok(self.eof)
     }
 
-    fn next_raw_token(&mut self) -> io::Result<Token> {
+    fn parse_token(&mut self, mode: ParseMode) -> io::Result<Token> {
         self.skip_whitespace()?;
 
-        let ch = match self.peek_byte()? {
-            Some(b) => b,
+        let b = match self.peek_byte()? {
+            Some(x) => x,
             None => return Ok(Token::Eof),
         };
 
-        match ch {
+        match b {
             b'{' => {
                 self.consume_byte()?;
                 Ok(Token::StartObject)
@@ -260,20 +286,20 @@ impl<R: io::Read> PullParser<R> {
                 self.consume_byte()?;
                 Ok(Token::Comma)
             }
-            b'"' => self.parse_string(),
-            b'-' | b'0'..=b'9' => self.parse_number(),
-            b'f' | b't' => self.parse_boolean(ch),
+            b'"' => self.parse_string(mode),
+            b'-' | b'0'..=b'9' => self.parse_number(mode),
+            b'f' | b't' => self.parse_boolean(b),
             b'n' => self.parse_null(),
             _ => err(&format!(
                 "unexpected character '{}'",
-                ascii::escape_default(ch)
+                ascii::escape_default(b)
             )),
         }
     }
 
     /* ---------- Parsing ---------- */
 
-    fn parse_string(&mut self) -> io::Result<Token> {
+    fn parse_string(&mut self, mode: ParseMode) -> io::Result<Token> {
         self.consume_expected(b'"')?;
         let mut out: Vec<u8> = Vec::new();
 
@@ -284,31 +310,117 @@ impl<R: io::Read> PullParser<R> {
             match b {
                 b'"' => break,
                 b'\\' => {
-                    out.push(b);
-                    let e = self
-                        .next_byte()?
-                        .ok_or_else(|| error("unterminated json string"))?;
-                    out.push(e);
+                    if mode == ParseMode::Parse {
+                        out.push(b);
+                    }
+                    self.parse_string_esc(mode, &mut out)?;
                 }
                 0x00..=0x1F => return err(&format!("invalid control byte {} in json string", b)),
-                _ => out.push(b),
+                _ => {
+                    if mode == ParseMode::Parse {
+                        out.push(b);
+                    }
+                }
             }
         }
 
-        Ok(Token::String(out))
+        match String::from_utf8(out) {
+            Ok(s) => Ok(Token::String(s)),
+            Err(_) => err(&format!("invalid UTF-8 bytes in json string")),
+        }
     }
 
-    fn parse_number(&mut self) -> io::Result<Token> {
+    fn parse_string_esc(&mut self, mode: ParseMode, out: &mut Vec<u8>) -> io::Result<()> {
+        let b = self
+            .next_byte()?
+            .ok_or_else(|| error("unterminated json string"))?;
+        let push = |out: &mut Vec<u8>, b: u8| {
+            if mode == ParseMode::Parse {
+                out.push(b);
+            }
+        };
+        match b {
+            b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => push(out, b),
+            b'u' => {
+                let high = self.parse_hex4(mode, out)?;
+
+                if (0xD800..=0xDBFF).contains(&high) {
+                    self.parse_low_surrogate(mode, out, high)?;
+                } else if (0xDC00..=0xDFFF).contains(&high) {
+                    return err_unpaired_low_surrogate(high);
+                } else {
+                    codepoint_to_char(high as u32)?;
+                };
+            }
+            _ => {
+                return err_invalid_escape(b);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_hex4(&mut self, mode: ParseMode, out: &mut Vec<u8>) -> io::Result<u16> {
+        let mut value: u16 = 0;
+
+        for _ in 0..4 {
+            let b = self
+                .peek_byte()?
+                .ok_or_else(|| error_incomplete_escape_uxxxx())?;
+
+            let digit = match b {
+                b'0'..=b'9' => (b - b'0') as u16,
+                b'a'..=b'f' => (b - b'a' + 10) as u16,
+                b'A'..=b'F' => (b - b'A' + 10) as u16,
+                _ => return err_invalid_hex_digit(b),
+            };
+            self.consume_byte()?;
+            if mode == ParseMode::Parse {
+                out.push(b);
+            }
+            value = (value << 4) | digit;
+        }
+        Ok(value)
+    }
+
+    fn parse_low_surrogate(
+        &mut self,
+        mode: ParseMode,
+        out: &mut Vec<u8>,
+        high: u16,
+    ) -> io::Result<()> {
+        match (self.next_byte()?, self.next_byte()?) {
+            (Some(b'\\'), Some(b'u')) => {
+                let low = self.parse_hex4(mode, out)?;
+                if !(0xDC00..=0xDFFF).contains(&low) {
+                    return err_invalid_low_surrogate(high, low);
+                }
+                if mode == ParseMode::Parse {
+                    out.push(b'\\');
+                    out.push(b'u');
+                }
+                let _ = surrogate_pair_to_char(high, low)?;
+                Ok(())
+            }
+            _ => err_missing_low_surrogate(high),
+        }
+    }
+
+    fn parse_number(&mut self, mode: ParseMode) -> io::Result<Token> {
         let mut s = String::new();
+        let push = |s: &mut String, c: char| {
+            if mode == ParseMode::Parse {
+                s.push(c);
+            }
+        };
 
         if self.peek_byte()? == Some(b'-') {
-            s.push('-');
+            push(&mut s, '-');
             self.consume_byte()?;
         }
 
         match self.peek_byte()? {
             Some(b'0') => {
-                s.push('0');
+                push(&mut s, '0');
                 self.consume_byte()?;
                 match self.peek_byte()? {
                     Some(x) => {
@@ -324,7 +436,7 @@ impl<R: io::Read> PullParser<R> {
             }
             Some(b'1'..=b'9') => {
                 while let Some(b'0'..=b'9') = self.peek_byte()? {
-                    s.push(self.next_byte()?.unwrap() as char);
+                    push(&mut s, self.next_byte()?.unwrap() as char);
                 }
             }
             Some(b) => return err(&format!("invalid byte {} in json number", b)),
@@ -332,12 +444,12 @@ impl<R: io::Read> PullParser<R> {
         }
 
         if self.peek_byte()? == Some(b'.') {
-            s.push('.');
+            push(&mut s, '.');
             self.consume_byte()?;
             let mut digit = false;
             while let Some(b'0'..=b'9') = self.peek_byte()? {
                 digit = true;
-                s.push(self.next_byte()?.unwrap() as char);
+                push(&mut s, self.next_byte()?.unwrap() as char);
             }
             if !digit {
                 return err(&format!("missing fraction digits in json number {}", s));
@@ -345,14 +457,14 @@ impl<R: io::Read> PullParser<R> {
         }
 
         if matches!(self.peek_byte()?, Some(b'e' | b'E')) {
-            s.push(self.next_byte()?.unwrap() as char);
+            push(&mut s, self.next_byte()?.unwrap() as char);
             if matches!(self.peek_byte()?, Some(b'+' | b'-')) {
-                s.push(self.next_byte()?.unwrap() as char);
+                push(&mut s, self.next_byte()?.unwrap() as char);
             }
             let mut digit = false;
             while let Some(b'0'..=b'9') = self.peek_byte()? {
                 digit = true;
-                s.push(self.next_byte()?.unwrap() as char);
+                push(&mut s, self.next_byte()?.unwrap() as char);
             }
             if !digit {
                 return err(&format!("missing exponent digits in json number {}", s));
@@ -362,10 +474,10 @@ impl<R: io::Read> PullParser<R> {
         Ok(Token::Number(s))
     }
 
-    fn parse_boolean(&mut self, ch: u8) -> io::Result<Token> {
-        if ch == b't' && self.consume_keyword("true")? {
+    fn parse_boolean(&mut self, b: u8) -> io::Result<Token> {
+        if b == b't' && self.consume_keyword("true")? {
             Ok(Token::Boolean(true))
-        } else if ch == b'f' && self.consume_keyword("false")? {
+        } else if b == b'f' && self.consume_keyword("false")? {
             Ok(Token::Boolean(false))
         } else {
             err("invalid json boolean keyword")
@@ -383,6 +495,8 @@ impl<R: io::Read> PullParser<R> {
     /* ---------- Syntax Validation ---------- */
 
     fn validate_kind(&mut self, kind: Kind) -> io::Result<()> {
+        // println!("validate kind {:?}, state {:?}", kind, self.stack.last());
+
         match self.stack.last_mut() {
             None => self.validate_root(kind),
             Some(state) => match state {
@@ -428,7 +542,10 @@ impl<R: io::Read> PullParser<R> {
                         self.stack.pop();
                         self.after_value()
                     }
-                    _ => err(&format!("expecting ',' or '}}', found {:?}", kind)),
+                    _ => err(&format!(
+                        "expecting ',' or '}}' in json object, found {:?}",
+                        kind
+                    )),
                 },
 
                 Expect::ArrayValue => match kind {
@@ -472,7 +589,10 @@ impl<R: io::Read> PullParser<R> {
                         self.stack.pop();
                         self.after_value()
                     }
-                    _ => err(&format!("expecting ',' or ']' found {:?}", kind)),
+                    _ => err(&format!(
+                        "expecting ',' or ']' in json array, found {:?}",
+                        kind
+                    )),
                 },
             },
         }
@@ -507,7 +627,7 @@ impl<R: io::Read> PullParser<R> {
             }
             Kind::Boolean | Kind::Number | Kind::String | Kind::Null => Ok(()),
             _ => err(&format!(
-                "expecting json array, object or value, found {:?}",
+                "expecting json array, json object or value, found {:?}",
                 kind
             )),
         }
@@ -550,16 +670,17 @@ impl<R: io::Read> PullParser<R> {
     }
 
     fn consume_byte(&mut self) -> io::Result<()> {
-        self.next_byte()?.ok_or_else(|| error("unexpected EOF"))?;
+        self.next_byte()?.ok_or_else(|| error_unexpected_eof())?;
         Ok(())
     }
 
     fn consume_expected(&mut self, expected: u8) -> io::Result<()> {
-        let b = self.next_byte()?.ok_or_else(|| error("unexpected EOF"))?;
+        let b = self.next_byte()?.ok_or_else(|| error_unexpected_eof())?;
         if b != expected {
             err(&format!(
-                "unexpected character {:?}, expecting {:?}",
-                b, expected
+                "unexpected character '{}', expecting '{}'",
+                ascii::escape_default(b),
+                expected
             ))
         } else {
             Ok(())
@@ -602,142 +723,183 @@ impl<R: io::Read> PullParser<R> {
 }
 
 /**
- * interpret any escape sequence found in a Json string (represented as &[u8])
- * and return the corresponding unescaped String
+ * interpret any escape sequence found in a Json string (represented as Vec<u8>)
+ * and return the corresponding unescaped Vec<u8>
+ *
+ * converting between String and Vec<u8> is up to the caller.
  */
-pub fn unescape_string(input: &[u8]) -> io::Result<String> {
-    let mut bytes = input.iter().copied().peekable();
-    let mut output = String::new();
+pub fn json_unescape_string(v: Vec<u8>) -> io::Result<Vec<u8>> {
+    let mut buf = v;
+    let len = buf.len();
+    let mut ipos: usize = 0;
+    let mut opos: usize = 0;
 
-    while let Some(b) = bytes.next() {
-        if b != b'\\' {
-            output.push(b as char);
+    while ipos < len {
+        if buf[ipos] != b'\\' {
+            buf[opos] = buf[ipos];
+            ipos += 1;
+            opos += 1;
             continue;
         }
 
-        let esc = match bytes.next() {
-            Some(b) => b,
-            None => return err("invalid trailing backslash in json string"),
-        };
+        ipos += 1;
+        if ipos >= len {
+            return err("unexpected end while unescaping json string");
+        }
 
-        match esc {
-            b'"' => output.push('"'),
-            b'\\' => output.push('\\'),
-            b'/' => output.push('/'),
-            b'b' => output.push('\u{0008}'),
-            b'f' => output.push('\u{000C}'),
-            b'n' => output.push('\n'),
-            b'r' => output.push('\r'),
-            b't' => output.push('\t'),
+        let b = buf[ipos];
+        match b {
+            b'"' | b'\\' | b'/' => append_byte(&mut buf, &mut opos, b),
+            b'b' => append_byte(&mut buf, &mut opos, 0x08),
+            b'f' => append_byte(&mut buf, &mut opos, 0x0C),
+            b'n' => append_byte(&mut buf, &mut opos, b'\n'),
+            b'r' => append_byte(&mut buf, &mut opos, b'\r'),
+            b't' => append_byte(&mut buf, &mut opos, b'\t'),
             b'u' => {
-                let uni16 = read_hex4(&mut bytes)?;
+                ipos += 1;
+                let high = unescape_hex4(&buf, &mut ipos, len)?;
 
-                let ch = if (0xD800..=0xDBFF).contains(&uni16) {
-                    decode_low_surrogate(&mut bytes, uni16)?
-                } else if (0xDC00..=0xDFFF).contains(&uni16) {
-                    return err(&format!(
-                        "unpaired low surrogate {} in \\u escape in json string",
-                        uni16
-                    ));
+                let ch = if (0xD800..=0xDBFF).contains(&high) {
+                    unescape_low_surrogate_to_char(&mut buf, &mut ipos, len, high)?
+                } else if (0xDC00..=0xDFFF).contains(&high) {
+                    return err_unpaired_low_surrogate(high);
                 } else {
-                    char::from_u32(uni16 as u32).ok_or_else(|| {
-                        error(&format!(
-                            "invalid Unicode codepoint {} in \\u escape in json string",
-                            uni16
-                        ))
-                    })?
+                    codepoint_to_char(high as u32)?
                 };
 
-                output.push(ch);
+                append_utf8(&mut buf, &mut opos, ch);
+                continue;
             }
-            _ => {
-                return err(&format!(
-                    "invalid escape sequence \\{} in json string",
-                    esc as char
-                ));
-            }
+            _ => return err_invalid_escape(b),
         }
+        ipos += 1;
     }
 
-    Ok(output)
+    buf.truncate(opos);
+
+    Ok(buf)
 }
 
-fn decode_low_surrogate<I>(bytes: &mut std::iter::Peekable<I>, high: u16) -> io::Result<char>
-where
-    I: Iterator<Item = u8>,
-{
-    match (bytes.next(), bytes.next()) {
-        (Some(b'\\'), Some(b'u')) => {
-            let low = read_hex4(bytes)?;
-            if !(0xDC00..=0xDFFF).contains(&low) {
-                return err(&format!(
-                    "invalid low surrogate {} in \\u escape in json string",
-                    low
-                ));
-            }
+#[inline]
+fn append_byte(buf: &mut Vec<u8>, opos: &mut usize, b: u8) {
+    buf[*opos] = b;
+    *opos += 1;
+}
 
-            let uni32 = 0x10000 + (((high - 0xD800) as u32) << 10) + ((low - 0xDC00) as u32);
+#[inline]
+fn append_utf8(buf: &mut Vec<u8>, opos: &mut usize, ch: char) {
+    let mut tmp = [0u8; 4];
+    let encoded = ch.encode_utf8(&mut tmp);
+    buf[*opos..*opos + encoded.len()].copy_from_slice(encoded.as_bytes());
+    *opos += encoded.len();
+}
 
-            char::from_u32(uni32).ok_or_else(|| {
-                error(&format!(
-                    "invalid Unicode codepoint {} in \\u escape in json string",
-                    uni32
-                ))
-            })
-        }
-        _ => err(&format!(
-            "missing \\u and low surrogate after high surrogate {} in json string",
-            high
-        )),
+fn surrogate_pair_to_char(high: u16, low: u16) -> io::Result<char> {
+    let uni32 = 0x10000 + (((high - 0xD800) as u32) << 10) + ((low - 0xDC00) as u32);
+
+    char::from_u32(uni32).ok_or_else(|| {
+        error(&format!(
+            "invalid Unicode codepoint U+{:x} in json string escape pair \\u{:04x}\\u{:04x}",
+            uni32, high, low
+        ))
+    })
+}
+
+fn codepoint_to_char(uni32: u32) -> io::Result<char> {
+    char::from_u32(uni32).ok_or_else(|| {
+        error(&format!(
+            "invalid Unicode codepoint U+{:x} in json string escape \\u{:04x}",
+            uni32, uni32
+        ))
+    })
+}
+
+fn unescape_low_surrogate_to_char(
+    buf: &mut Vec<u8>,
+    ipos: &mut usize,
+    len: usize,
+    high: u16,
+) -> io::Result<char> {
+    let pos = *ipos;
+    if pos + 1 >= len || buf[pos] != b'\\' || buf[pos + 1] != b'u' {
+        return err_missing_low_surrogate(high);
     }
+    *ipos += 2;
+    let low = unescape_hex4(&buf, ipos, len)?;
+    if !(0xDC00..=0xDFFF).contains(&low) {
+        return err_invalid_low_surrogate(high, low);
+    }
+    surrogate_pair_to_char(high, low)
 }
 
-fn read_hex4<I>(bytes: &mut std::iter::Peekable<I>) -> io::Result<u16>
-where
-    I: Iterator<Item = u8>,
-{
-    let mut value: u16 = 0;
+fn unescape_hex4(buf: &[u8], read: &mut usize, len: usize) -> io::Result<u16> {
+    if *read + 4 > len {
+        return Err(error_incomplete_escape_uxxxx());
+    }
 
+    let mut val: u16 = 0;
     for _ in 0..4 {
-        let b = bytes
-            .next()
-            .ok_or_else(|| error("incomplete \\u escape in json string"))?;
-
+        let b = buf[*read];
+        *read += 1;
         let digit = match b {
             b'0'..=b'9' => (b - b'0') as u16,
             b'a'..=b'f' => (b - b'a' + 10) as u16,
             b'A'..=b'F' => (b - b'A' + 10) as u16,
-            _ => {
-                return err(&format!(
-                    "invalid hex digit {} in \\u escape in json string",
-                    b as char
-                ));
-            }
+            _ => return err_invalid_hex_digit(b),
         };
-
-        value = (value << 4) | digit;
+        val = val << 4 | digit;
     }
-
-    Ok(value)
+    Ok(val)
 }
 
+fn err_unpaired_low_surrogate<T>(val: u16) -> io::Result<T> {
+    err(&format!(
+        "unpaired low surrogate \\u{:x} in json string",
+        val
+    ))
+}
+
+fn err_invalid_low_surrogate<T>(high: u16, low: u16) -> io::Result<T> {
+    err(&format!(
+        "out-of-range low surrogate \\u{:04x} after high surrogate \\u{:04x} in json string",
+        low, high
+    ))
+}
+
+fn err_missing_low_surrogate<T>(high: u16) -> io::Result<T> {
+    err(&format!(
+        "missing \\u and low surrogate after high surrogate \\u{:x} in json string",
+        high
+    ))
+}
+
+fn err_invalid_escape<T>(b: u8) -> io::Result<T> {
+    err(&format!(
+        "invalid escape sequence \\{} in json string",
+        ascii::escape_default(b)
+    ))
+}
+
+fn err_invalid_hex_digit<T>(b: u8) -> io::Result<T> {
+    err(&format!(
+        "invalid hex digit '{}' in \\u json string escape",
+        ascii::escape_default(b)
+    ))
+}
+
+#[inline]
 fn err<T>(msg: &str) -> io::Result<T> {
     Err(error(msg))
+}
+
+fn error_incomplete_escape_uxxxx() -> io::Error {
+    error("incomplete \\u json string escape")
+}
+
+fn error_unexpected_eof() -> io::Error {
+    error("unexpected EOF")
 }
 
 fn error(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
-
-/*
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
-*/
